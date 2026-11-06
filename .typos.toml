@@ -29,6 +29,7 @@ wdth = "wdth"
 
 # Match Inside a Word - Case Insensitive
 [default.extend-words]
+trak = "trak"
 wdth = "wdth"
 
 [files]

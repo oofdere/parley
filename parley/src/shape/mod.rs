@@ -55,6 +55,8 @@ pub(crate) fn shape_text<'a, B: Brush>(
     layout: &mut Layout<B>,
     analysis_data_sources: &AnalysisDataSources,
 ) {
+    let scale = layout.data.scale;
+
     // If we have both empty text and no inline boxes, shape with a fake space
     // to generate metrics that can be used to size a cursor.
     if text.is_empty() && inline_boxes.is_empty() {
@@ -172,6 +174,9 @@ pub(crate) fn shape_text<'a, B: Brush>(
                 options: ShapeOptions {
                     language: item_style.locale,
                     font_size: item_style.font_size,
+                    // TODO: Keep the logical font size in `ResolvedStyle` instead of
+                    // dividing the scale back out.
+                    point_size: item_style.font_size / scale,
                     features: &style_features[item_style_index as usize],
                     variations: rcx.variations(item_style.font_variations).unwrap_or(&[]),
                 },
