@@ -131,6 +131,51 @@ fn style_font_weight_uses_variable_axis_default() {
     env.check_layout_snapshot(&layout);
 }
 
+#[test]
+fn style_font_weight_follows_weight_map() {
+    use parley::PositionedLayoutItem;
+    use parley::style::FontFamily;
+
+    let mut env = TestEnv::new(test_name!(), None);
+    let synthesized = |env: &mut TestEnv, weight: FontWeight| {
+        let mut builder = env.ranged_builder("Weight");
+        builder.push_default(StyleProperty::FontFamily(FontFamily::named("Roboto Flex")));
+        builder.push_default(StyleProperty::FontWeight(weight));
+        let mut layout = builder.build("Weight");
+        layout.break_all_lines(None);
+        let line = layout.lines().next().unwrap();
+        let Some(PositionedLayoutItem::GlyphRun(run)) = line.items().next() else {
+            panic!("no glyph run")
+        };
+        let synthesis = run.run().synthesis();
+        // Roboto Flex's `wght` axis defaults to 400, which synthesis leaves unset.
+        synthesis
+            .variation_settings()
+            .iter()
+            .find(|(tag, _)| tag.to_be_bytes() == *b"wght")
+            .map_or(400.0, |v| v.1)
+    };
+    let roboto_flex = env.collection().family_id("Roboto Flex").unwrap();
+    assert_eq!(synthesized(&mut env, FontWeight::NORMAL), 400.0);
+
+    env.collection().set_weight_map(
+        Some(roboto_flex),
+        &[(100.0, 110.0), (400.0, 590.0), (900.0, 1000.0)],
+    );
+    assert_eq!(synthesized(&mut env, FontWeight::NORMAL), 590.0);
+    assert_eq!(synthesized(&mut env, FontWeight::new(650.0)), 795.0);
+    assert_eq!(synthesized(&mut env, FontWeight::new(50.0)), 110.0);
+
+    // A family's own map wins over the one for every family.
+    env.collection()
+        .set_weight_map(None, &[(1.0, 301.0), (700.0, 1000.0), (1000.0, 1000.0)]);
+    assert_eq!(synthesized(&mut env, FontWeight::NORMAL), 590.0);
+    env.collection().set_weight_map(Some(roboto_flex), &[]);
+    assert_eq!(synthesized(&mut env, FontWeight::NORMAL), 700.0);
+    env.collection().set_weight_map(None, &[]);
+    assert_eq!(synthesized(&mut env, FontWeight::NORMAL), 400.0);
+}
+
 // ============================================================================
 // FontWidth Tests
 // ============================================================================

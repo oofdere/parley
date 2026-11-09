@@ -168,6 +168,17 @@ impl Collection {
         self.inner.append_generic_families(generic, families);
     }
 
+    /// Sets the weight fonts of `family` are matched and synthesized at for
+    /// each requested weight, as a platform resolves its own fonts (Apple's
+    /// system font under Bold Text, Android's font weight adjustment):
+    /// `(requested, used)` points with requested weights increasing, between
+    /// which the weight is interpolated, and the nearest point's outside them.
+    /// `None` sets it for every family without one of its own. No points
+    /// removes it.
+    pub fn set_weight_map(&mut self, family: Option<FamilyId>, points: &[(f32, f32)]) {
+        self.inner.set_weight_map(family, points);
+    }
+
     /// Returns an iterator over the fallback families for the given
     /// key.
     pub fn fallback_families(
@@ -428,6 +439,45 @@ impl Inner {
         }
         #[cfg(not(feature = "std"))]
         self.data.generic_families.append(generic, families);
+    }
+
+    /// See [`Collection::set_weight_map`].
+    pub fn set_weight_map(&mut self, family: Option<FamilyId>, points: &[(f32, f32)]) {
+        self.sync_shared();
+        #[cfg(feature = "std")]
+        if let Some(shared) = &self.shared {
+            shared.data.lock().unwrap().set_weight_map(family, points);
+            shared.bump_version();
+        } else {
+            self.data.set_weight_map(family, points);
+        }
+        #[cfg(not(feature = "std"))]
+        self.data.set_weight_map(family, points);
+    }
+
+    /// The weight fonts of `family` are matched at for `weight` (see
+    /// [`Collection::set_weight_map`]).
+    pub fn mapped_weight(&mut self, family: FamilyId, weight: FontWeight) -> FontWeight {
+        self.sync_shared();
+        let Some(points) = self
+            .data
+            .weights
+            .get(&Some(family))
+            .or_else(|| self.data.weights.get(&None))
+        else {
+            return weight;
+        };
+        let w = weight.value();
+        let (first, last) = (points[0], points[points.len() - 1]);
+        if w <= first.0 {
+            return FontWeight::new(first.1);
+        }
+        if w >= last.0 {
+            return FontWeight::new(last.1);
+        }
+        let i = points.partition_point(|p| p.0 < w);
+        let ((a, b), (c, d)) = (points[i - 1], points[i]);
+        FontWeight::new(b + (d - b) * (w - a) / (c - a))
     }
 
     /// Returns an iterator over the fallback families for the given
@@ -697,6 +747,7 @@ struct CommonData {
     families: FamilyMap,
     generic_families: GenericFamilyMap,
     fallbacks: FallbackMap,
+    weights: HashMap<Option<FamilyId>, Arc<[(f32, f32)]>>,
 }
 
 impl CommonData {
@@ -839,6 +890,14 @@ impl CommonData {
 
     fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    fn set_weight_map(&mut self, family: Option<FamilyId>, points: &[(f32, f32)]) {
+        if points.is_empty() {
+            self.weights.remove(&family);
+        } else {
+            self.weights.insert(family, points.into());
+        }
     }
 }
 

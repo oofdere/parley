@@ -141,12 +141,13 @@ impl<'a> Query<'a> {
             let Entry::Ok(family_info) = &family.family else {
                 continue;
             };
-            let bucket = load_bucket(
-                family_info,
-                self.attributes,
-                &mut family.best,
-                self.source_cache,
-            );
+            let attributes = Attributes {
+                weight: self
+                    .collection
+                    .mapped_weight(family.id, self.attributes.weight),
+                ..self.attributes
+            };
+            let bucket = load_bucket(family_info, attributes, &mut family.best, self.source_cache);
             let mut yielded_default = false;
             for font in bucket {
                 if font.family.1 == family_info.default_font_index() {
@@ -161,7 +162,7 @@ impl<'a> Query<'a> {
             }
             if let Some(font) = load_font(
                 family_info,
-                self.attributes,
+                attributes,
                 &mut family.default,
                 self.source_cache,
             ) && f(font) == QueryStatus::Stop
