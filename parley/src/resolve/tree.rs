@@ -50,6 +50,10 @@ pub(crate) struct TreeStyleBuilder<B: Brush> {
     /// Whether the most recently pushed item is an inline box, in which case pending collapsible
     /// whitespace is not at the start of the inline formatting context.
     last_item_is_inline_box: bool,
+    /// Whether the text ends with a space committed for collapsible whitespace, followed by
+    /// nothing but [span edge](crate::InlineBoxKind::is_span_edge) boxes, so that collapsible
+    /// whitespace after those boxes collapses into it.
+    collapsible_space_at_end: bool,
 }
 
 impl<B: Brush> Default for TreeStyleBuilder<B> {
@@ -62,6 +66,7 @@ impl<B: Brush> Default for TreeStyleBuilder<B> {
             current_span: usize::MAX,
             pending_whitespace: None,
             last_item_is_inline_box: false,
+            collapsible_space_at_end: false,
         }
     }
 }
@@ -82,6 +87,7 @@ impl<B: Brush> TreeStyleBuilder<B> {
         self.text.clear();
         self.pending_whitespace = None;
         self.last_item_is_inline_box = false;
+        self.collapsible_space_at_end = false;
 
         // The root style is always materialised at index 0 so that it can act as the parent of
         // every other style (and as the strut for otherwise empty lines).
@@ -101,6 +107,15 @@ impl<B: Brush> TreeStyleBuilder<B> {
     /// treated as whitespace at the start of the inline formatting context.
     pub(crate) fn set_last_item_is_inline_box(&mut self) {
         self.last_item_is_inline_box = true;
+        self.collapsible_space_at_end = false;
+    }
+
+    /// Records that a [`SpanStart`](crate::InlineBoxKind::SpanStart) box is about to be pushed.
+    ///
+    /// Pending collapsible whitespace goes before the box, and collapsible whitespace following the
+    /// box collapses into it, as white space collapses across the start edge of a CSS inline box.
+    pub(crate) fn push_span_start(&mut self) {
+        self.flush_pending_whitespace();
     }
 
     /// Applies white space processing to `text` in the current span and commits the result, leaving
@@ -174,7 +189,7 @@ impl<B: Brush> TreeStyleBuilder<B> {
         // immediately following a preserved segment break. Whitespace following a preserved space
         // or tab is retained, as only collapsible whitespace collapses.
         let is_at_start = self.text.is_empty() && !self.last_item_is_inline_box;
-        if is_at_start || self.text.ends_with(is_segment_break) {
+        if is_at_start || self.text.ends_with(is_segment_break) || self.collapsible_space_at_end {
             return;
         }
 
@@ -184,6 +199,7 @@ impl<B: Brush> TreeStyleBuilder<B> {
             self.resolve_style_id(pending.span)
         };
         self.commit_styled_text(style_index, " ");
+        self.collapsible_space_at_end = true;
     }
 
     /// The style table index of the span that text is currently being pushed into.
@@ -211,6 +227,7 @@ impl<B: Brush> TreeStyleBuilder<B> {
             }),
         }
         self.last_item_is_inline_box = false;
+        self.collapsible_space_at_end = false;
     }
 
     /// The index of `span`'s style in the style table, adding it (and any ancestors that have not

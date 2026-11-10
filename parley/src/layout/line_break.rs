@@ -630,6 +630,10 @@ pub struct BreakerState {
     prev_boundary: Option<PrevBoundaryState>,
     /// Saved breaker state for the last emergency line-breaking opportunity
     emergency_boundary: Option<PrevBoundaryState>,
+    /// Saved breaker state from before the [`SpanStart`](InlineBoxKind::SpanStart) boxes that
+    /// were just added to the line: a line-breaking opportunity at the content that follows them
+    /// is taken before them.
+    span_start_boundary: Option<PrevBoundaryState>,
 }
 
 impl Default for BreakerState {
@@ -650,6 +654,7 @@ impl Default for BreakerState {
             subtrees: SubtreeHistory::default(),
             prev_boundary: None,
             emergency_boundary: None,
+            span_start_boundary: None,
         }
     }
 }
@@ -735,14 +740,52 @@ impl BreakerState {
     /// Store the current iteration state so that we can revert to it if we later want to take
     /// the line breaking opportunity at this point.
     fn mark_line_break_opportunity(&mut self) {
-        self.prev_boundary = Some(PrevBoundaryState {
+        self.prev_boundary = Some(self.boundary());
+    }
+
+    /// The current iteration state, to revert to later.
+    fn boundary(&mut self) -> PrevBoundaryState {
+        PrevBoundaryState {
             item_idx: self.item_idx,
             run_idx: self.run_idx,
             cluster_idx: self.cluster_idx,
             state: self.line.clone(),
             contributed_len: self.contributed.len(),
             subtrees_len: self.subtrees.save(),
-        });
+        }
+    }
+
+    /// Whether `boundary` is the current iteration state, i.e., nothing has been added to the
+    /// line since it was saved.
+    fn is_at(&self, boundary: &PrevBoundaryState) -> bool {
+        boundary.item_idx == self.item_idx
+            && boundary.run_idx == self.run_idx
+            && boundary.cluster_idx == self.cluster_idx
+    }
+
+    /// Add a [span edge](InlineBoxKind::is_span_edge) box to the line, with the box of the span
+    /// `style_index` it was pushed in (and those of the span's ancestors).
+    fn append_span_edge_to_line(
+        &mut self,
+        next_x: f32,
+        style_index: u16,
+        style_metrics: &[StyleMetrics],
+    ) {
+        self.item_idx += 1;
+        self.line.items.end += 1;
+        // A line holding an inline box with non-zero margins, borders or padding is not an
+        // invisible line box (CSS 2 §9.4.2).
+        if next_x != self.line.x {
+            self.line.box_metrics.has_content = true;
+        }
+        self.line.x = next_x;
+        self.line.box_metrics.add_style(
+            style_index,
+            style_metrics,
+            &mut self.contributed,
+            &mut self.subtrees,
+        );
+        self.update_max_height_exceeded();
     }
 
     /// Store the current iteration state so that we can revert to it if we later want to take
@@ -866,6 +909,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
     fn reset_line(&mut self) {
         let state = &mut self.state;
         state.line.reset();
+        state.span_start_boundary = None;
         state.contributed.clear();
         state.subtrees.clear();
         state.line.box_metrics.add_style(
@@ -893,6 +937,12 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             layout_box.baseline_offset = placement.baseline_offset;
             self.state
                 .append_aligned_inline_box_to_line(next_x, inline_box, placement, quantize);
+        } else if inline_box.kind.is_span_edge() {
+            self.state.append_span_edge_to_line(
+                next_x,
+                layout_box.parent_style_index,
+                &self.layout.data.style_metrics,
+            );
         } else {
             self.state
                 .append_inline_box_to_line(next_x, f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -1062,6 +1112,41 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                 LayoutItemKind::InlineBox => {
                     let inline_box = &self.layout.data.inline_boxes[item.index].inline_box;
 
+                    // Span edges are no line-breaking opportunity: a start edge stays with the
+                    // content after it, an end edge with the content before it.
+                    if inline_box.kind.is_span_edge() {
+                        let next_x = self.state.line.x + inline_box.width;
+                        let is_start = inline_box.kind == InlineBoxKind::SpanStart;
+                        if next_x > max_advance
+                            && self.state.line.text_wrap_mode == TextWrapMode::Wrap
+                            && self.state.line.x != 0.0
+                            && let Some(prev) = self.state.prev_boundary.take()
+                        {
+                            self.state.reset_to(prev);
+                            return self.start_new_line(
+                                BreakReason::Regular,
+                                max_advance,
+                                line_indent,
+                            );
+                        }
+                        if is_start && self.state.span_start_boundary.is_none() {
+                            self.state.span_start_boundary = Some(self.state.boundary());
+                        }
+                        // An opportunity right before an end edge moves after it.
+                        let at_opportunity = !is_start
+                            && self
+                                .state
+                                .prev_boundary
+                                .as_ref()
+                                .is_some_and(|boundary| self.state.is_at(boundary));
+                        self.append_layout_inline_box(item.index, next_x);
+                        if at_opportunity {
+                            self.state.mark_line_break_opportunity();
+                        }
+                        continue;
+                    }
+                    self.state.span_start_boundary = None;
+
                     // In-flow boxes are aligned relative to their containing style's span box
                     // (see `append_aligned_inline_box_to_line`). Out-of-flow boxes are not in-flow
                     // content: unlike an atomic inline they neither contribute to the line's
@@ -1082,6 +1167,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 advance: self.state.line.x,
                             }));
                         }
+                        InlineBoxKind::SpanStart | InlineBoxKind::SpanEnd => unreachable!(),
                     };
 
                     // Compute the x position of the content being currently processed
@@ -1162,9 +1248,16 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 line_indent,
                             );
                         } else if is_soft_wrap_opportunity && text_wrap_mode == TextWrapMode::Wrap {
+                            // An opportunity right after span start edges is taken before them,
+                            // and is none when they start the line.
+                            if let Some(boundary) = self.state.span_start_boundary.take() {
+                                if boundary.state.x != 0.0 {
+                                    self.state.prev_boundary = Some(boundary);
+                                }
+                            }
                             // We don't record boundaries when the advance is 0. As we do not want overflowing content to cause extra consecutive
                             // line breaks. We should accept the overflowing fragment in that scenario.
-                            if self.state.line.x != 0.0 {
+                            else if self.state.line.x != 0.0 {
                                 self.state.mark_line_break_opportunity();
                                 // break_opportunity = true;
                             }
@@ -1177,6 +1270,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         {
                             self.state.mark_emergency_break_opportunity();
                         }
+                        self.state.span_start_boundary = None;
 
                         // Breaking an atom requires reshaping, which we don't do here, so it is
                         // consumed as a whole (this includes all clusters of a ligature).
@@ -1318,7 +1412,12 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     let inline_box = &self.layout.data.inline_boxes[item.index].inline_box;
 
                     if inline_box.kind != InlineBoxKind::InFlow {
-                        self.append_layout_inline_box(item.index, self.state.line.x);
+                        let width = if inline_box.kind.is_span_edge() {
+                            inline_box.width
+                        } else {
+                            0.0
+                        };
+                        self.append_layout_inline_box(item.index, self.state.line.x + width);
                         continue;
                     }
 

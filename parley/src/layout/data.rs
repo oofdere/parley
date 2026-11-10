@@ -429,6 +429,10 @@ struct ContentWidthsMeasurer {
     /// Indents for lines following a soft/hard wrap.
     soft_indent: f32,
     hard_indent: f32,
+
+    /// The width of the [`SpanStart`](InlineBoxKind::SpanStart) boxes not yet placed: they go
+    /// with the content after them, so after any soft wrap opportunity there.
+    pending_span_start: f32,
 }
 
 impl ContentWidthsMeasurer {
@@ -446,7 +450,16 @@ impl ContentWidthsMeasurer {
             soft_indent: indent_options.indent_following_soft_wrap_break(indent_amount),
             hard_indent: indent_options.indent_following_forced_line_break(indent_amount),
             line_has_content: false,
+            pending_span_start: 0.,
         }
+    }
+
+    /// Places the pending [`SpanStart`](InlineBoxKind::SpanStart) boxes on the current line.
+    #[inline(always)]
+    fn place_span_start(&mut self) {
+        self.running_min_width += self.pending_span_start;
+        self.running_max_width += self.pending_span_start;
+        self.pending_span_start = 0.;
     }
 
     /// Ends the current min-content fragment at a soft wrap opportunity.
@@ -522,6 +535,16 @@ impl ContentWidthsMeasurer {
                 }
                 LayoutItemKind::InlineBox => {
                     let inline_box = &layout_data.inline_boxes[item.index].inline_box;
+                    match inline_box.kind {
+                        InlineBoxKind::SpanStart => self.pending_span_start += inline_box.width,
+                        InlineBoxKind::SpanEnd => {
+                            self.place_span_start();
+                            self.running_min_width += inline_box.width;
+                            self.running_max_width += inline_box.width;
+                            self.line_has_content = true;
+                        }
+                        _ => {}
+                    }
                     if inline_box.kind == InlineBoxKind::InFlow {
                         let next = items.as_slice().iter().find(|next| {
                             next.kind == LayoutItemKind::TextRun
@@ -544,6 +567,7 @@ impl ContentWidthsMeasurer {
             }
         }
 
+        self.place_span_start();
         // The end of a layout is considered to be a forced line break as per CSS Text 4 § 5, so
         // whitespace can hang conditionally.
         if self.line_has_content {
@@ -601,6 +625,10 @@ impl ContentWidthsMeasurer {
                         || style.overflow_wrap == OverflowWrap::Anywhere)
                 {
                     self.soft_break(i != empty_at);
+                }
+                if self.pending_span_start != 0. {
+                    self.place_span_start();
+                    empty_at = usize::MAX;
                 }
                 // `Whitespace::Newline` are forced breaks. Note newlines have no advance.
                 if whitespace == Whitespace::Newline {
@@ -666,6 +694,7 @@ impl ContentWidthsMeasurer {
         if wraps {
             self.soft_break(self.line_has_content);
         }
+        self.place_span_start();
         // Inline boxes don't hang.
         self.running_hanging_whitespace = 0.0;
         self.running_min_width += inline_box.width;

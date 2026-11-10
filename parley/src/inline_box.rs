@@ -59,4 +59,26 @@ pub enum InlineBoxKind {
     ///
     /// They can be used to implement advanced layout modes such as CSS's `float`
     CustomOutOfFlow,
+    /// `SpanStart` boxes take up space at the start of the style span they are pushed in, without
+    /// growing the line beyond that span's own box.
+    ///
+    /// They are the margin, border and padding at the inline-start edge of a CSS inline box (CSS 2
+    /// §10.3.1): unlike an `InFlow` box, they are no line break opportunity, and stay on the line of
+    /// the content that follows them. Collapsible white space collapses across them, and a line
+    /// holding one holds the span's box.
+    SpanStart,
+    /// `SpanEnd` boxes take up space at the end of the style span they are pushed in, without
+    /// growing the line beyond that span's own box.
+    ///
+    /// They are the margin, border and padding at the inline-end edge of a CSS inline box: unlike
+    /// an `InFlow` box, they are no line break opportunity, and stay on the line of the content
+    /// that precedes them.
+    SpanEnd,
+}
+
+impl InlineBoxKind {
+    /// Whether this is a [`SpanStart`](Self::SpanStart) or [`SpanEnd`](Self::SpanEnd) box.
+    pub fn is_span_edge(self) -> bool {
+        matches!(self, Self::SpanStart | Self::SpanEnd)
+    }
 }
